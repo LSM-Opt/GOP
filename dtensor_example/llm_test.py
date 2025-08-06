@@ -37,7 +37,7 @@ print(model)
 ### Distributed 설정
 from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel, SequenceParallel
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import Replicate
+from torch.distributed.tensor import Replicate, Shard
 
 dist.init_process_group(backend="nccl")
 torch.cuda.synchronize()
@@ -47,14 +47,50 @@ tp_mesh = init_device_mesh("cuda", (world_size,))
 for name, module in model.named_modules():
     print(f"Name: {name}")
     if module._get_name() == "LlamaDecoderLayer":
+        case_attn = 0
+        case_mlp = 0
+        def attention_parallelization(module, case_attn):
+            if case_attn == 0:
+                module.self_attn.num_heads = module.self_attn.num_heads // tp_mesh.size()
+                module.self_attn.num_key_value_heads = module.self_attn.num_key_value_heads // tp_mesh.size()
+                module_self_attn_parallel = parallelize_module(module.self_attn, tp_mesh,
+                                                        {"q_proj": ColwiseParallel(),
+                                                            "k_proj": ColwiseParallel(),
+                                                            "v_proj": ColwiseParallel(),
+                                                            "o_proj": RowwiseParallel()})
+            elif case_attn == 1:
+                module_self_attn_parallel = parallelize_module(module.self_attn, tp_mesh,
+                                                        {"q_proj": RowwiseParallel(input_layouts=Replicate()),
+                                                            "k_proj": RowwiseParallel(input_layouts=Replicate()),
+                                                            "v_proj": RowwiseParallel(input_layouts=Replicate()),
+                                                            "o_proj": RowwiseParallel(input_layouts=Replicate())})
+            elif case_attn == 2:
+                module.self_attn.num_heads = module.self_attn.num_heads // tp_mesh.size()
+                module.self_attn.num_key_value_heads = module.self_attn.num_key_value_heads // tp_mesh.size()
+                module_self_attn_parallel = parallelize_module(module.self_attn, tp_mesh,
+                                                        {"q_proj": ColwiseParallel(),
+                                                            "k_proj": ColwiseParallel(),
+                                                            "v_proj": ColwiseParallel(),
+                                                            "o_proj": ColwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate())})
+            else:
+                dist.destroy_process_group()
+                raise ValueError(f"Invalid attention parallelization case: {case_attn}")
+            return module_self_attn_parallel
         
-        module.self_attn.num_heads = module.self_attn.num_heads // tp_mesh.size()
-        module.self_attn.num_key_value_heads = module.self_attn.num_key_value_heads // tp_mesh.size()
+        def mlp_parallelization(module, case_mlp):
+            if case_mlp == 0: # GSPMD attempt 2, 3 - fast
+                module_mlp_parallel = parallelize_module(module.mlp, tp_mesh, {"gate_proj": ColwiseParallel(), "up_proj": ColwiseParallel(), "down_proj": RowwiseParallel()})
+            elif case_mlp == 1: # GSPMD attempt 1 - slow
+                module_mlp_parallel = parallelize_module(module.mlp, tp_mesh, {"gate_proj": RowwiseParallel(input_layouts=Replicate()), "up_proj": RowwiseParallel(input_layouts=Replicate()), "down_proj": ColwiseParallel(output_layouts=Replicate())})
+            else:
+                dist.destroy_process_group()
+                raise ValueError(f"Invalid mlp parallelization case: {case_mlp}")
+            return module_mlp_parallel
         
-        module_self_attn_parallel = parallelize_module(module.self_attn, tp_mesh, {"q_proj": ColwiseParallel(), "k_proj": ColwiseParallel(), "v_proj": ColwiseParallel(), "o_proj": RowwiseParallel()})
-        module_mlp_parallel = parallelize_module(module.mlp, tp_mesh, {"gate_proj": ColwiseParallel(), "down_proj": RowwiseParallel(), "up_proj": ColwiseParallel()})
-        module.self_attn = module_self_attn_parallel
+        module_self_attn_parallel = attention_parallelization(module, case_attn)
+        module_mlp_parallel = mlp_parallelization(module, case_mlp)
         module.mlp = module_mlp_parallel
+
 model.model = parallelize_module(model.model, tp_mesh,
                            {"embed_tokens": RowwiseParallel(input_layouts=Replicate()) })
 print("Parallelized model")
