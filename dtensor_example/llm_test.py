@@ -104,9 +104,7 @@ model = model.to(device)
 import torch._dynamo
 torch._dynamo.reset()
 
-# 
-model_opt = torch.compile(model, backend="tensorrt") if local_world_size > 1 \
-                else torch.compile(model, mode="reduce-overhead")
+model_opt = model
 print("Compiled model")
 print(model_opt)
 
@@ -135,12 +133,13 @@ def analyze_parallel_structure(model):
 analyze_parallel_structure(model)
 
 ### 모델 실행
-trace_file = "trace.json"
+trace_file = f"trace_{rank}.json"
 with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,
             with_stack=True,
-            on_trace_ready=lambda prof: prof.export_chrome_trace(trace_file)
+            on_trace_ready=lambda prof: prof.export_chrome_trace(trace_file),
+            schedule=torch.profiler.schedule(skip_first=2, wait=1, warmup=1, active=1, repeat=1)
         ) as prof:
     input_ids = inp['input_ids'].to(device)
     attention_mask = inp['attention_mask'].to(device)
@@ -148,17 +147,44 @@ with profile(
     dist.broadcast(attention_mask, src=0)
 
     with torch.no_grad():
-        # implement text generation without kv cache
-        generate_length = 10
-        for i in range(generate_length):
-            output = model_opt(input_ids=input_ids, attention_mask=attention_mask)
-            output_ids = output.logits.argmax(dim=-1)
-            input_ids = torch.concat([input_ids, output_ids[:, -1:]], dim=-1)
-            attention_mask = torch.ones_like(input_ids)
-            dist.broadcast(input_ids, src=0)
-            dist.broadcast(attention_mask, src=0)
-            if rank == 0:
-                print(tokenizer.decode(input_ids[-1], skip_special_tokens=True))
+        generate_length = 50
+        use_kvcache = True
+        from tqdm import tqdm
+        if use_kvcache:
+            for i in tqdm(range(generate_length), desc="Generating text"):
+                if i == 0:
+                    past_key_values = None
+                    current_input_ids = input_ids
+                else:
+                    past_key_values = output.past_key_values
+                    current_input_ids = input_ids[:, -1:]
+                    
+                attention_mask = torch.ones_like(input_ids)
+                dist.broadcast(current_input_ids, src=0)
+                dist.broadcast(attention_mask, src=0)
+
+                output = model_opt(input_ids=current_input_ids,
+                        attention_mask=attention_mask,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True)
+                
+                output_ids = output.logits.argmax(dim=-1)
+                input_ids = torch.concat([input_ids, output_ids[:, -1:]], dim=-1)
+                if rank == 0:
+                    print(tokenizer.decode(input_ids[-1], skip_special_tokens=True))
+                prof.step()
+        else:
+            for i in tqdm(range(generate_length), desc="Generating text"):
+                output = model_opt(input_ids=input_ids, attention_mask=attention_mask)
+                output_ids = output.logits.argmax(dim=-1)
+                input_ids = torch.concat([input_ids, output_ids[:, -1:]], dim=-1)
+                attention_mask = torch.ones_like(input_ids)
+                dist.broadcast(input_ids, src=0)
+                dist.broadcast(attention_mask, src=0)
+                if rank == 0:
+                    print(tokenizer.decode(input_ids[-1], skip_special_tokens=True))
+                prof.step()
 
 if rank == 0:
     predicted_ids = torch.argmax(output.logits, dim=-1)
