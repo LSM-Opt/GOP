@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.distributed as dist
-from torch.profiler import profile, ProfilerActivity
+from torch.profiler import profile, ProfilerActivity, schedule
 
 ### 디바이스 설정
 torch.manual_seed(1000)
@@ -44,6 +44,7 @@ torch.cuda.synchronize()
 
 tp_mesh = init_device_mesh("cuda", (world_size,))
 
+case_apply_parallel = True
 for name, module in model.named_modules():
     print(f"Name: {name}")
     if module._get_name() == "LlamaDecoderLayer":
@@ -87,24 +88,28 @@ for name, module in model.named_modules():
                 raise ValueError(f"Invalid mlp parallelization case: {case_mlp}")
             return module_mlp_parallel
         
-        module_self_attn_parallel = attention_parallelization(module, case_attn)
-        module_mlp_parallel = mlp_parallelization(module, case_mlp)
-        module.mlp = module_mlp_parallel
+        if case_attn != -1:
+            module_self_attn_parallel = attention_parallelization(module, case_attn)
+            module.self_attn = module_self_attn_parallel
+        if case_mlp != -1:
+            module_mlp_parallel = mlp_parallelization(module, case_mlp)
+            module.mlp = module_mlp_parallel
 
-model.model = parallelize_module(model.model, tp_mesh,
-                           {"embed_tokens": RowwiseParallel(input_layouts=Replicate()) })
+if case_apply_parallel:
+    model.model = parallelize_module(model.model, tp_mesh,
+                               {"embed_tokens": RowwiseParallel(input_layouts=Replicate()) })
 print("Parallelized model")
 print(model)
 
 
 ### 모델 컴파일
 device = "cuda"
-model = model.to(device)
+model = model.eval().to(device)
 
 import torch._dynamo
 torch._dynamo.reset()
 
-model_opt = model
+model_opt = torch.compile(model, mode="reduce-overhead")                                # Fake tensor error or no trace file
 print("Compiled model")
 print(model_opt)
 
