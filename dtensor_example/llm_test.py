@@ -9,8 +9,7 @@ torch.manual_seed(1000)
 world_size = int(os.environ["WORLD_SIZE"])
 rank = int(os.environ["RANK"])
 local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
-local_rank = int(os.environ["LOCAL_RANK"])
-torch.cuda.set_device(local_rank)
+torch.cuda.set_device(rank)
 
 ### 모델 생성
 MODEL="llama"
@@ -28,9 +27,11 @@ def init_model(name):
         )
         tokenizer = AutoTokenizer.from_pretrained(base_model)
         inp = tokenizer("hello, how are you today?", return_tensors="pt")
-        return model, inp, tokenizer
+        
+        output_example = model(input_ids=inp['input_ids'], attention_mask=inp['attention_mask'])
+        return model, inp, tokenizer, output_example
 
-model, inp, tokenizer = init_model(MODEL)
+model, inp, tokenizer, output_example = init_model(MODEL)
 print("Original model")
 print(model)
 
@@ -45,11 +46,11 @@ torch.cuda.synchronize()
 tp_mesh = init_device_mesh("cuda", (world_size,))
 
 case_apply_parallel = True
+case_attn = 0
+case_mlp = 0
 for name, module in model.named_modules():
     print(f"Name: {name}")
     if module._get_name() == "LlamaDecoderLayer":
-        case_attn = 0
-        case_mlp = 0
         def attention_parallelization(module, case_attn):
             if case_attn == 0:
                 module.self_attn.num_heads = module.self_attn.num_heads // tp_mesh.size()
@@ -148,47 +149,50 @@ with profile(
         ) as prof:
     input_ids = inp['input_ids'].to(device)
     attention_mask = inp['attention_mask'].to(device)
-    dist.broadcast(input_ids, src=0)
-    dist.broadcast(attention_mask, src=0)
 
+    generate_length = 500
     with torch.no_grad():
-        generate_length = 50
-        use_kvcache = True
-        from tqdm import tqdm
-        if use_kvcache:
-            for i in tqdm(range(generate_length), desc="Generating text"):
-                if i == 0:
-                    past_key_values = None
-                    current_input_ids = input_ids
-                else:
-                    past_key_values = output.past_key_values
-                    current_input_ids = input_ids[:, -1:]
+        phase = "decode" # "prefill" or "decode"
                     
-                attention_mask = torch.ones_like(input_ids)
+        from tqdm import tqdm
+        if phase == "prefill":
+            for i in tqdm(range(generate_length), desc="Prefill iterations"):
+                dist.broadcast(input_ids, src=0)
+                dist.broadcast(attention_mask, src=0)
+                torch.cuda.synchronize()
+                dist.barrier()
+
+                output = model_opt(input_ids=input_ids, attention_mask=attention_mask)
+                if rank == 0:
+                    output_ids = output.logits.argmax(dim=-1)
+                    print(tokenizer.decode(output_ids[-1, -1:], skip_special_tokens=True))
+                prof.step()
+        elif phase == "decode":
+            if case_attn != 0 and case_mlp != 0:
+                # Due to splitting of key-value cache across GPUs via head axis (Colwise->Rowwise)
+                # TODO: support this case
+                dist.destroy_process_group()
+                raise ValueError("case_attn and case_mlp cannot be both 0 when decode phase is evaluated")
+            
+            past_key_values = tuple(tuple(torch.chunk(tensor, world_size, dim=1)[rank % world_size].to(device) for tensor in layer) for layer in output_example.past_key_values)
+            output_ids = output_example.logits.argmax(dim=-1).to(device)
+            input_ids = torch.concat([input_ids, output_ids[:, -1:]], dim=-1)
+            current_input_ids = input_ids[:, -1:]
+            attention_mask = torch.ones_like(input_ids)
+            for i in tqdm(range(generate_length), desc="Decoding iterations"):
                 dist.broadcast(current_input_ids, src=0)
                 dist.broadcast(attention_mask, src=0)
+                torch.cuda.synchronize()
+                dist.barrier()
 
                 output = model_opt(input_ids=current_input_ids,
                         attention_mask=attention_mask,
                         past_key_values=past_key_values,
                         use_cache=True,
                         return_dict=True)
-                
-                output_ids = output.logits.argmax(dim=-1)
-                input_ids = torch.concat([input_ids, output_ids[:, -1:]], dim=-1)
                 if rank == 0:
-                    print(tokenizer.decode(input_ids[-1], skip_special_tokens=True))
-                prof.step()
-        else:
-            for i in tqdm(range(generate_length), desc="Generating text"):
-                output = model_opt(input_ids=input_ids, attention_mask=attention_mask)
-                output_ids = output.logits.argmax(dim=-1)
-                input_ids = torch.concat([input_ids, output_ids[:, -1:]], dim=-1)
-                attention_mask = torch.ones_like(input_ids)
-                dist.broadcast(input_ids, src=0)
-                dist.broadcast(attention_mask, src=0)
-                if rank == 0:
-                    print(tokenizer.decode(input_ids[-1], skip_special_tokens=True))
+                    output_ids = output.logits.argmax(dim=-1)
+                    print(tokenizer.decode(output_ids[-1, -1:], skip_special_tokens=True))
                 prof.step()
 
 if rank == 0:
