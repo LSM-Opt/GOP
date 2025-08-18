@@ -53,8 +53,9 @@ for name, module in model.named_modules():
     if module._get_name() == "LlamaDecoderLayer":
         def attention_parallelization(module, case_attn):
             if case_attn == 0:
-                module.self_attn.num_heads = module.self_attn.num_heads // tp_mesh.size()
-                module.self_attn.num_key_value_heads = module.self_attn.num_key_value_heads // tp_mesh.size()
+                if "2.7" in torch.__version__:
+                    module.self_attn.num_heads = module.self_attn.num_heads // tp_mesh.size()
+                    module.self_attn.num_key_value_heads = module.self_attn.num_key_value_heads // tp_mesh.size()
                 module_self_attn_parallel = parallelize_module(module.self_attn, tp_mesh,
                                                         {"q_proj": ColwiseParallel(),
                                                             "k_proj": ColwiseParallel(),
@@ -110,8 +111,18 @@ model = model.eval().to(device)
 import torch._dynamo
 torch._dynamo.reset()
 
-model_opt = torch.compile(model, mode="reduce-overhead")                                # Fake tensor error or no trace file
-print("Compiled model")
+use_compile = True
+if use_compile:
+    #import torch_tensorrt
+    #model_opt = torch.compile(model, backend="tensorrt") #model
+    #model_opt = torch.compile(model, mode="max-autotune-no-cudagraphs", dynamic=False)     # can't create trace file
+    #model_opt = torch.compile(model, dynamic=False)     # can't create trace file
+    #model_opt = torch.compile(model, mode="reduce-overhead", dynamic=False)                # cudagraph error
+    model_opt = torch.compile(model, mode="reduce-overhead")                                # Fake tensor error or no trace file
+    print("Use compiled model")
+else:
+    model_opt = model
+    print("Use original model")
 print(model_opt)
 
 
