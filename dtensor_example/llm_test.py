@@ -20,10 +20,11 @@ def init_model(name):
         return torchvision.models.resnet50().to(torch.float32).cuda(), inp, None
     elif name == "llama":
         from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
-        base_model = './Llama-3.1-8B-Instruct'
+        base_model = './dist/models/Llama-3.1-8B-Instruct-W4A16_ASYM'
+        #base_model = './dist/models/Llama-3.1-8B-Instruct-NVFP4A16'
         model = AutoModelForCausalLM.from_pretrained(
             base_model,
-            torch_dtype=torch.float16,
+            torch_dtype="auto",
         )
         tokenizer = AutoTokenizer.from_pretrained(base_model)
         inp = tokenizer("hello, how are you today?", return_tensors="pt")
