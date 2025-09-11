@@ -1,2 +1,3 @@
 trace.json
 torch_compile_debug/
+logs/
