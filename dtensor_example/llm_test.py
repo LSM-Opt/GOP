@@ -1,9 +1,21 @@
+#import logging
 import os
+import time
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.distributed.tensor import distribute_tensor
 from torch.profiler import profile, ProfilerActivity, schedule
+
+from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM, DynamicCache
+from transformers.modeling_outputs import CausalLMOutputWithPast
+
+#torch._logging.set_logs(output_code=True)
+#torch._logging.set_logs(dynamo=logging.DEBUG, graph_code=True)
+#torch._logging.set_logs(inductor=logging.DEBUG, distributed=True, graph=True, fusion=True)
+
+torch.cuda.memory._record_memory_history()
+torch.cuda.memory.reset_peak_memory_stats()
 
 ### 디바이스 설정
 torch.manual_seed(1000)
@@ -13,6 +25,54 @@ rank = int(os.environ["RANK"])
 local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
 torch.cuda.set_device(rank)
 
+#use_compressed_linear = False
+#use_compile = True
+#model_name = 'Llama-3.1-8B-Instruct'
+#model_name = 'CodeLlama-34b-hf'
+
+use_compressed_linear = False
+use_compile = False
+#model_name = 'Llama-3.1-8B-Instruct-W8A8'
+model_name = 'Llama-3.1-70B-Instruct-W8A8'
+
+#use_compressed_linear = True
+#use_compile = False
+#model_name = 'Llama-3.1-8B-Instruct-W4A16_ASYM'
+#model_name = 'Llama-3.1-8B-Instruct-NVFP4A16'
+#model_name = 'CodeLlama-34b-hf-W4A16_ASYM'
+#model_name = 'Llama-3.1-70B-Instruct-W4A16_ASYM'
+
+base_model = './dist/models/' + model_name
+
+case_fsdp = False
+
+case_apply_parallel = True
+case_attn = 0
+case_mlp = 0
+
+#case_apply_parallel = False
+#case_attn = -1
+#case_mlp = -1
+
+## Coefficient:
+### 기본 문장은 2+6개 token. coefficient에 따라 2+6*coefficient개 token으로 변경.
+### 1000개일 때, 8B + FP16 모델이 single GPU에서 약 20GB
+### 2000개일 때, 8B + W4A16 모델이 dual GPU에서 약 
+prompt_coefficient = 1000 # 1000 # 1
+generate_length = 10 #500
+phase = "decode" # "prefill" or "decode"
+
+
+log_description = f"{model_name}_" + f"rank_{rank}_" + \
+                    f"{"compressed" if use_compressed_linear else "uncompressed"}_" + \
+                    f"{"compiled" if use_compile else "uncompiled"}_" + \
+                    f"{"distributed" if case_apply_parallel else "single"}_" + \
+                    f"{"fsdp" if case_fsdp else "no_fsdp"}_" + \
+                    f"{"prefill" if phase == "prefill" else "decode"}_" + \
+                    f"{"long_context" if prompt_coefficient != 1 else "short_context"}"
+                    
+output_example_name = f"./logs/output_example_{model_name}_prompt_{prompt_coefficient}.pt"
+
 ### 모델 생성
 MODEL="llama"
 def init_model(name):
@@ -21,12 +81,6 @@ def init_model(name):
         inp = generate_data(batch)[0]
         return torchvision.models.resnet50().to(torch.float32).cuda(), inp, None
     elif name == "llama":
-        from transformers import AutoModel, AutoTokenizer, AutoModelForCausalLM
-        #base_model = './dist/models/Llama-3.1-8B-Instruct'
-        #base_model = './dist/models/Llama-3.1-8B-Instruct-W4A16_ASYM'
-        #base_model = './dist/models/Llama-3.1-8B-Instruct-NVFP4A16'
-        base_model = './dist/models/CodeLlama-34b-hf-W4A16_ASYM'
-        #base_model = './dist/models/Llama-3.1-70B-Instruct-W4A16_ASYM'
         model = AutoModelForCausalLM.from_pretrained(
             base_model,
             torch_dtype="auto",
@@ -34,36 +88,38 @@ def init_model(name):
         
         tokenizer = AutoTokenizer.from_pretrained(base_model)
         inp = tokenizer("hello, how are you today?", return_tensors="pt")
+        if prompt_coefficient != 1:
+            inp['input_ids'] = torch.cat([inp['input_ids'][:, :1], inp['input_ids'][:, 1:-2].repeat(1, prompt_coefficient), inp['input_ids'][:, -1:]], dim=1)
+            inp['attention_mask'] = torch.ones_like(inp['input_ids'])
         
-        from compressed_tensors.linear.compressed_linear import CompressedLinear
-        for name, module in model.named_modules():
-            if isinstance(module, CompressedLinear):
-                print(name, module.quantization_status)
-                
-                from torch import Tensor
-                from torch.nn import Parameter
-                from torch.nn.functional import linear
-                from compressed_tensors.quantization import QuantizationStatus
-                def persist_forward(self, input: Tensor) -> Tensor:
-                    if self.quantization_status != QuantizationStatus.COMPRESSED:
-                        raise ValueError("Quantization status is not compressed")
+        if use_compressed_linear:
+            from compressed_tensors.linear.compressed_linear import CompressedLinear
+            for name, module in model.named_modules():
+                if isinstance(module, CompressedLinear):
+                    print(name, module.quantization_status)
                     
-                    weight_data = self.compressor.decompress_module(self)
-                    param = Parameter(weight_data, requires_grad=False)
+                    from torch import Tensor
+                    from torch.nn import Parameter
+                    from torch.nn.functional import linear
+                    from compressed_tensors.quantization import QuantizationStatus
+                    def persist_forward(self, input: Tensor) -> Tensor:
+                        if self.quantization_status != QuantizationStatus.COMPRESSED:
+                            raise ValueError("Quantization status is not compressed")
+                        
+                        weight_data = self.compressor.decompress_module(self)
+                        param = Parameter(weight_data, requires_grad=False)
 
-                    return linear(input, param, self.bias)
-                persist_forward = persist_forward.__get__(module, module.__class__)
-                setattr(module, "forward", persist_forward)
-                from compressed_tensors.utils import register_offload_parameter
-                register_offload_parameter(module, "weight", module.weight_packed)
+                        return linear(input, param, self.bias)
+                    persist_forward = persist_forward.__get__(module, module.__class__)
+                    setattr(module, "forward", persist_forward)
+                    from compressed_tensors.utils import register_offload_parameter
+                    register_offload_parameter(module, "weight", module.weight_packed)
+        
+        return model, inp, tokenizer
 
-        output_example = None #model(input_ids=inp['input_ids'], attention_mask=inp['attention_mask'])
-        return model, inp, tokenizer, output_example
-
-model, inp, tokenizer, output_example = init_model(MODEL)
+model, inp, tokenizer = init_model(MODEL)
 print("Original model")
 print(model)
-evice = "cuda"
 model = model.eval()
 
 ### Distributed 설정
@@ -76,9 +132,31 @@ torch.cuda.synchronize()
 
 tp_mesh = init_device_mesh("cuda", (world_size,))
 
-case_apply_parallel = True
-case_attn = 0
-case_mlp = 0
+
+dist.barrier()
+
+if not(os.path.exists(output_example_name+"_0") and os.path.exists(output_example_name+"_1")):
+    if rank == 0:
+        output_example = model(input_ids=inp['input_ids'], attention_mask=inp['attention_mask'])
+        keys, values = output_example.past_key_values.key_cache, output_example.past_key_values.value_cache
+        torch.save(keys, output_example_name+"_0")
+        torch.save(values, output_example_name+"_1")
+        torch.save(output_example.logits, output_example_name+"_2")
+        print(f"Save output example to {output_example_name}")
+        
+dist.barrier()
+
+from transformers import DynamicCache
+past_key_values = DynamicCache()
+past_key_values.key_cache = torch.load(output_example_name+"_0")
+past_key_values.value_cache = torch.load(output_example_name+"_1")
+example_logits = torch.load(output_example_name+"_2")
+output_example = CausalLMOutputWithPast(past_key_values=past_key_values, logits=example_logits)
+print(f"Load output example from {output_example_name}")
+
+dist.barrier()
+
+
 with torch.no_grad():
     for name, module in model.named_modules():
         print(f"Name: {name}")
@@ -93,14 +171,16 @@ with torch.no_grad():
                                                                 "k_proj": ColwiseParallel(),
                                                                 "v_proj": ColwiseParallel(),
                                                                 "o_proj": RowwiseParallel()})
-                    module_self_attn_parallel.q_proj.weight_shape = nn.Parameter(module_self_attn_parallel.q_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False) # NotImplementedError: Operator aten.unbind.int does not have a sharding strategy registered.
-                    module_self_attn_parallel.k_proj.weight_shape = nn.Parameter(module_self_attn_parallel.k_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
-                    module_self_attn_parallel.v_proj.weight_shape = nn.Parameter(module_self_attn_parallel.v_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
-                    module_self_attn_parallel.o_proj.weight_shape = nn.Parameter(module_self_attn_parallel.o_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
-                    delattr(module_self_attn_parallel.q_proj, "weight") # weight는 parallelize_module에서 weight_packed sharding 유도를 위해서만 사용. 이후 사용되지 않아 제거.
-                    delattr(module_self_attn_parallel.k_proj, "weight")
-                    delattr(module_self_attn_parallel.v_proj, "weight")
-                    delattr(module_self_attn_parallel.o_proj, "weight")
+                    if use_compressed_linear:
+                        module_self_attn_parallel.q_proj.weight_shape = nn.Parameter(module_self_attn_parallel.q_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False) # NotImplementedError: Operator aten.unbind.int does not have a sharding strategy registered.
+                        module_self_attn_parallel.k_proj.weight_shape = nn.Parameter(module_self_attn_parallel.k_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
+                        module_self_attn_parallel.v_proj.weight_shape = nn.Parameter(module_self_attn_parallel.v_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
+                        module_self_attn_parallel.o_proj.weight_shape = nn.Parameter(module_self_attn_parallel.o_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
+                        delattr(module_self_attn_parallel.q_proj, "weight") # weight는 parallelize_module에서 weight_packed sharding 유도를 위해서만 사용. 이후 사용되지 않아 제거.
+                        delattr(module_self_attn_parallel.k_proj, "weight")
+                        delattr(module_self_attn_parallel.v_proj, "weight")
+                        delattr(module_self_attn_parallel.o_proj, "weight")
+                    
                 elif case_attn == 1:
                     module_self_attn_parallel = parallelize_module(module.self_attn, tp_mesh,
                                                             {"q_proj": RowwiseParallel(input_layouts=Replicate()),
@@ -123,12 +203,14 @@ with torch.no_grad():
             def mlp_parallelization(module, case_mlp):
                 if case_mlp == 0: # GSPMD attempt 2, 3 - fast
                     module_mlp_parallel = parallelize_module(module.mlp, tp_mesh, {"gate_proj": ColwiseParallel(), "up_proj": ColwiseParallel(), "down_proj": RowwiseParallel()})
-                    module_mlp_parallel.gate_proj.weight_shape = nn.Parameter(module_mlp_parallel.gate_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
-                    module_mlp_parallel.up_proj.weight_shape = nn.Parameter(module_mlp_parallel.up_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
-                    module_mlp_parallel.down_proj.weight_shape = nn.Parameter(module_mlp_parallel.down_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
-                    delattr(module_mlp_parallel.gate_proj, "weight")
-                    delattr(module_mlp_parallel.up_proj, "weight")
-                    delattr(module_mlp_parallel.down_proj, "weight")
+                    if use_compressed_linear:
+                        module_mlp_parallel.gate_proj.weight_shape = nn.Parameter(module_mlp_parallel.gate_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
+                        module_mlp_parallel.up_proj.weight_shape = nn.Parameter(module_mlp_parallel.up_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
+                        module_mlp_parallel.down_proj.weight_shape = nn.Parameter(module_mlp_parallel.down_proj.weight_shape.full_tensor().to("cpu"), requires_grad=False)
+                        delattr(module_mlp_parallel.gate_proj, "weight")
+                        delattr(module_mlp_parallel.up_proj, "weight")
+                        delattr(module_mlp_parallel.down_proj, "weight")
+                    
                 elif case_mlp == 1: # GSPMD attempt 1 - slow
                     module_mlp_parallel = parallelize_module(module.mlp, tp_mesh, {"gate_proj": RowwiseParallel(input_layouts=Replicate()), "up_proj": RowwiseParallel(input_layouts=Replicate()), "down_proj": ColwiseParallel(output_layouts=Replicate())})
                 else:
@@ -145,9 +227,26 @@ with torch.no_grad():
 
     if case_apply_parallel:
         model.model = parallelize_module(model.model, tp_mesh,
-                                {"embed_tokens": RowwiseParallel(input_layouts=Replicate()) })
+                                {"embed_tokens": RowwiseParallel(input_layouts=Replicate()) })    #breakpoint()
+    if case_apply_parallel:
+        model.lm_head = parallelize_module(model.lm_head, tp_mesh,
+                                {"embed_tokens": ColwiseParallel(output_layouts=Replicate()) })
     print("Parallelized model")
     print(model)
+
+if case_fsdp:
+    from torch.distributed.fsdp import fully_shard, FSDPModule
+    for layer in model.model.layers:
+        fully_shard(layer)
+    fully_shard(model)
+    print("FSDP model")
+    print(model)
+
+#torch.distributed.barrier()
+#torch.distributed.breakpoint(0)
+# p model.model.layers[0].mlp.up_proj.weight
+# p model.model.layers[0].mlp.gate_proj.weight
+# p model.model.layers[0].mlp.down_proj.weight
 
 ### 모델 컴파일
 device = "cuda"
@@ -181,7 +280,6 @@ analyze_memory_usage(model)
 import torch._dynamo
 torch._dynamo.reset()
 
-use_compile = False
 if use_compile:
     #import torch_tensorrt
     #model_opt = torch.compile(model, backend="tensorrt") #model
@@ -195,35 +293,15 @@ else:
     print("Use original model")
 print(model_opt)
 
-
-### 모델 DTensor 정보 확인
-def analyze_parallel_structure(model):
-    print("Parallelized Model Structure Analysis:")
-
-    for name, module in model.named_modules():
-        if hasattr(module, '_ddp_params_and_buffers_to_ignore'):
-            print(f"  {name}: DDP ignored parameters")
-
-        if hasattr(module, 'device_mesh'):
-            print(f"  {name}: Device mesh - {module.device_mesh}")
-
-        if hasattr(module, 'placements'):
-            print(f"  {name}: Placement strategy - {module.placements}")
-
-        # DTensor 정보 확인
-        for param_name, param in module.named_parameters(recurse=False):
-            if hasattr(param, '_spec') and param._spec is not None:
-                print(f"    {param_name}: DTensor spec - {param._spec}")
-                print(f"      - Mesh: {param._spec.device_mesh}")
-                print(f"      - Placements: {param._spec.placements}")
-
-#analyze_parallel_structure(model)
+print(torch.cuda.memory_summary())
+print(torch.cuda.memory_stats())
 
 ### 모델 실행
-trace_file = f"trace_{rank}.json"
+trace_file = f"./logs/trace_{log_description}.json"
 with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,
+            profile_memory=True,
             with_stack=True,
             on_trace_ready=lambda prof: prof.export_chrome_trace(trace_file),
             schedule=torch.profiler.schedule(skip_first=2, wait=1, warmup=1, active=1, repeat=1)
@@ -231,21 +309,23 @@ with profile(
     input_ids = inp['input_ids'].to(device)
     attention_mask = inp['attention_mask'].to(device)
 
-    generate_length = 20 #500
     with torch.no_grad():
-        phase = "prefill" # "prefill" or "decode"
-                    
         from tqdm import tqdm
         if phase == "prefill":
             for i in tqdm(range(generate_length), desc="Prefill iterations"):
+                torch.cuda.synchronize()
+                time_start = time.time()
                 dist.broadcast(input_ids, src=0)
                 dist.broadcast(attention_mask, src=0)
                 torch.cuda.synchronize()
                 dist.barrier()
 
                 output = model_opt(input_ids=input_ids, attention_mask=attention_mask)
+                output_ids = output.logits.argmax(dim=-1)
+                torch.cuda.synchronize()
+                time_end = time.time()
+                print(f"Time taken: {(time_end - time_start) * 1000} ms")
                 if rank == 0:
-                    output_ids = output.logits.argmax(dim=-1)
                     print(tokenizer.decode(output_ids[-1, -1:], skip_special_tokens=True))
                 prof.step()
         elif phase == "decode":
@@ -255,12 +335,18 @@ with profile(
                 dist.destroy_process_group()
                 raise ValueError("case_attn and case_mlp cannot be both 0 when decode phase is evaluated")
             
-            past_key_values = tuple(tuple(torch.chunk(tensor, world_size, dim=1)[rank % world_size].to(device) for tensor in layer) for layer in output_example.past_key_values)
+            past_key_values_legacy = tuple(tuple(torch.chunk(tensor, world_size, dim=1)[rank % world_size].to(device) for tensor in layer) for layer in output_example.past_key_values)            
             output_ids = output_example.logits.argmax(dim=-1).to(device)
             input_ids = torch.concat([input_ids, output_ids[:, -1:]], dim=-1)
             current_input_ids = input_ids[:, -1:]
             attention_mask = torch.ones_like(input_ids)
             for i in tqdm(range(generate_length), desc="Decoding iterations"):
+                if "2.7" not in torch.__version__:
+                    past_key_values = DynamicCache.from_legacy_cache(past_key_values_legacy)
+                else:
+                    past_key_values = past_key_values_legacy
+                torch.cuda.synchronize()
+                time_start = time.time()
                 dist.broadcast(current_input_ids, src=0)
                 dist.broadcast(attention_mask, src=0)
                 torch.cuda.synchronize()
@@ -271,10 +357,16 @@ with profile(
                         past_key_values=past_key_values,
                         use_cache=True,
                         return_dict=True)
+                torch.cuda.synchronize()
+                time_end = time.time()
+                print(f"Time taken: {(time_end - time_start) * 1000} ms")
                 if rank == 0:
                     output_ids = output.logits.argmax(dim=-1)
                     print(tokenizer.decode(output_ids[-1, -1:], skip_special_tokens=True))
                 prof.step()
+
+snapshot_file = f"./logs/mem_snapshot_{log_description}.pickle"
+torch.cuda.memory._dump_snapshot(snapshot_file)
 
 if rank == 0:
     predicted_ids = torch.argmax(output.logits, dim=-1)
@@ -282,5 +374,12 @@ if rank == 0:
     print(decoded_text)
 
 print(prof.events())
+
+print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=10))
+
+print(f"Peak memory allocated: {torch.cuda.memory.max_memory_allocated() / 1024**3:.2f} GB")
+
+print("Exported trace file to", trace_file)
+print("Exported memory snapshot to", snapshot_file)
 
 dist.destroy_process_group()
