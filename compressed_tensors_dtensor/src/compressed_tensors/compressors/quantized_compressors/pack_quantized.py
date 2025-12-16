@@ -26,6 +26,7 @@ from compressed_tensors.quantization.lifecycle.forward import dequantize, quanti
 from compressed_tensors.quantization.utils import can_quantize
 from torch import Tensor
 
+from torch.distributed.tensor import DTensor
 
 __all__ = ["PackedQuantizationCompressor", "pack_to_int32", "unpack_from_int32"]
 
@@ -251,6 +252,7 @@ def unpack_from_int32(
     num_bits: int,
     shape: torch.Size,
     packed_dim: Union[Literal[0], Literal[1]] = 1,
+    unpacked = None,
 ) -> torch.Tensor:
     """
     Unpacks a tensor of packed int32 weights into individual int8s, maintaining the
@@ -275,31 +277,58 @@ def unpack_from_int32(
 
     # unpack
     mask = (1 << num_bits) - 1
+    
+    use_sharding = True
+    try:
+        value.device_mesh
+    except AttributeError:
+        use_sharding = False
+    
+    if use_sharding:
+        if len(value.device_mesh.shape) > 1:
+            raise ValueError("PackedQuantizationCompressor does not support mesh with dimension greater than 1")
+    shard_0 = 1 # sharding 고려하여 local tensor 크기 조정. 0번째 dimension
+    shard_1 = 1 # 1번째 dimension
+    if use_sharding:
+        if isinstance(value.placements[0], torch.distributed.tensor.placement_types.Shard):
+            sharding = value.device_mesh.shape[0]
+            if value.placements[0].dim == 0:
+                shard_0 = sharding
+            else:
+                shard_1 = sharding
 
     if packed_dim == 1:
-        unpacked = torch.zeros(
-            (value.shape[0], value.shape[1] * pack_factor),
-            device=value.device,
-            dtype=torch.int32,
-        )
+        if unpacked is None:
+            unpacked = torch.zeros(
+                (value.shape[0] // shard_0, (value.shape[1] * pack_factor) // shard_1),
+                device=value.device,
+                dtype=torch.int32,
+                requires_grad=False
+            )
+            if use_sharding:
+                unpacked = DTensor.from_local(unpacked, device_mesh=value.device_mesh, placements=value.placements)
         for i in range(pack_factor):
             unpacked[:, i::pack_factor] = (value >> (num_bits * i)) & mask
 
         # remove padding
-        original_row_size = int(shape[1])
-        unpacked = unpacked[:, :original_row_size]
+        #original_row_size = int(shape[1])
+        #unpacked = unpacked[:, :original_row_size]   ### FIXME: DTensor에서 구현되지 않은 연산 (alias operator?)
     else:
-        unpacked = torch.zeros(
-            (value.shape[0] * pack_factor, value.shape[1]),
-            device=value.device,
-            dtype=torch.int32,
-        )
+        if unpacked is None:
+            unpacked = torch.zeros(
+                (value.shape[0] * pack_factor // shard_0, value.shape[1] // shard_1),
+                device=value.device,
+                dtype=torch.int32,
+                requires_grad=False
+            )
+            if use_sharding:
+                unpacked = DTensor.from_local(unpacked, device_mesh=value.device_mesh, placements=value.placements)
         for i in range(pack_factor):
             unpacked[i::pack_factor, :] = (value >> (num_bits * i)) & mask
 
         # remove padding
-        original_row_size = int(shape[0])
-        unpacked = unpacked[:original_row_size, :]
+        #original_row_size = int(shape[0])
+        #unpacked = unpacked[:original_row_size, :]   ### FIXME: DTensor에서 구현되지 않은 연산 (alias operator?)
 
     # bits are packed in unsigned format, reformat to signed
     # update the value range from unsigned to signed

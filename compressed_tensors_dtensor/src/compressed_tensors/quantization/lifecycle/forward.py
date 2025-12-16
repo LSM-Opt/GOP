@@ -380,6 +380,10 @@ def forward_quantize(
         scale = getattr(module, f"{base_name}_scale")
         zero_point = getattr(module, f"{base_name}_zero_point", None)
 
+    from torch.distributed.tensor import distribute_tensor, Replicate
+    if zero_point is not None:
+        zero_point = distribute_tensor(zero_point, value.device_mesh, [Replicate()])
+        
     return fake_quantize(
         x=value,
         scale=scale,
