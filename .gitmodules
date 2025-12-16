@@ -1,0 +1,134 @@
+[submodule "pytorch_dtensor_test/third_party/pybind11"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/pybind11
+	url = https://github.com/pybind/pybind11.git
+[submodule "pytorch_dtensor_test/third_party/googletest"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/googletest
+	url = https://github.com/google/googletest.git
+[submodule "pytorch_dtensor_test/third_party/benchmark"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/benchmark
+	url = https://github.com/google/benchmark.git
+[submodule "pytorch_dtensor_test/third_party/protobuf"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/protobuf
+	url = https://github.com/protocolbuffers/protobuf.git
+[submodule "pytorch_dtensor_test/third_party/NNPACK"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/NNPACK
+	url = https://github.com/Maratyszcza/NNPACK.git
+[submodule "pytorch_dtensor_test/third_party/gloo"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/gloo
+	url = https://github.com/pytorch/gloo
+[submodule "pytorch_dtensor_test/third_party/pthreadpool"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/pthreadpool
+	url = https://github.com/Maratyszcza/pthreadpool.git
+[submodule "pytorch_dtensor_test/third_party/FXdiv"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/FXdiv
+	url = https://github.com/Maratyszcza/FXdiv.git
+[submodule "pytorch_dtensor_test/third_party/FP16"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/FP16
+	url = https://github.com/Maratyszcza/FP16.git
+[submodule "pytorch_dtensor_test/third_party/psimd"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/psimd
+	url = https://github.com/Maratyszcza/psimd.git
+[submodule "pytorch_dtensor_test/third_party/cpuinfo"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/cpuinfo
+	url = https://github.com/pytorch/cpuinfo.git
+[submodule "pytorch_dtensor_test/third_party/python-peachpy"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/python-peachpy
+	url = https://github.com/malfet/PeachPy.git
+[submodule "pytorch_dtensor_test/third_party/onnx"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/onnx
+	url = https://github.com/onnx/onnx.git
+[submodule "pytorch_dtensor_test/third_party/sleef"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/sleef
+	url = https://github.com/shibatch/sleef
+[submodule "pytorch_dtensor_test/third_party/ideep"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/ideep
+	url = https://github.com/intel/ideep
+[submodule "pytorch_dtensor_test/third_party/gemmlowp/gemmlowp"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/gemmlowp/gemmlowp
+	url = https://github.com/google/gemmlowp.git
+[submodule "pytorch_dtensor_test/third_party/fbgemm"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/fbgemm
+	url = https://github.com/pytorch/fbgemm
+[submodule "pytorch_dtensor_test/android/libs/fbjni"]
+    ignore = dirty
+	path = pytorch_dtensor_test/android/libs/fbjni
+	url = https://github.com/facebookincubator/fbjni.git
+[submodule "pytorch_dtensor_test/third_party/XNNPACK"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/XNNPACK
+	url = https://github.com/google/XNNPACK.git
+[submodule "pytorch_dtensor_test/third_party/fmt"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "pytorch_dtensor_test/third_party/tensorpipe"]
+    ignore = dirty
+	path = pytorch_dtensor_test/third_party/tensorpipe
+	url = https://github.com/pytorch/tensorpipe.git
+[submodule "pytorch_dtensor_test/third_party/cudnn_frontend"]
+	path = pytorch_dtensor_test/third_party/cudnn_frontend
+	url = https://github.com/NVIDIA/cudnn-frontend.git
+[submodule "pytorch_dtensor_test/third_party/kineto"]
+	path = pytorch_dtensor_test/third_party/kineto
+	url = https://github.com/pytorch/kineto
+[submodule "pytorch_dtensor_test/third_party/pocketfft"]
+	path = pytorch_dtensor_test/third_party/pocketfft
+	url = https://github.com/mreineck/pocketfft
+[submodule "pytorch_dtensor_test/third_party/ittapi"]
+	path = pytorch_dtensor_test/third_party/ittapi
+	url = https://github.com/intel/ittapi.git
+[submodule "pytorch_dtensor_test/third_party/flatbuffers"]
+	path = pytorch_dtensor_test/third_party/flatbuffers
+	url = https://github.com/google/flatbuffers.git
+[submodule "pytorch_dtensor_test/third_party/nlohmann"]
+	path = pytorch_dtensor_test/third_party/nlohmann
+	url = https://github.com/nlohmann/json.git
+[submodule "pytorch_dtensor_test/third_party/VulkanMemoryAllocator"]
+	path = pytorch_dtensor_test/third_party/VulkanMemoryAllocator
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+[submodule "pytorch_dtensor_test/third_party/cutlass"]
+	path = pytorch_dtensor_test/third_party/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
+[submodule "pytorch_dtensor_test/third_party/mimalloc"]
+	path = pytorch_dtensor_test/third_party/mimalloc
+	url = https://github.com/microsoft/mimalloc.git
+[submodule "pytorch_dtensor_test/third_party/opentelemetry-cpp"]
+	path = pytorch_dtensor_test/third_party/opentelemetry-cpp
+	url = https://github.com/open-telemetry/opentelemetry-cpp.git
+[submodule "pytorch_dtensor_test/third_party/cpp-httplib"]
+	path = pytorch_dtensor_test/third_party/cpp-httplib
+	url = https://github.com/yhirose/cpp-httplib.git
+    branch = v0.15.3
+[submodule "pytorch_dtensor_test/third_party/NVTX"]
+	path = pytorch_dtensor_test/third_party/NVTX
+	url = https://github.com/NVIDIA/NVTX.git
+[submodule "pytorch_dtensor_test/third_party/composable_kernel"]
+	path = pytorch_dtensor_test/third_party/composable_kernel
+	url = https://github.com/ROCm/composable_kernel.git
+    branch = develop
+[submodule "pytorch_dtensor_test/third_party/kleidiai"]
+	path = pytorch_dtensor_test/third_party/kleidiai
+	url = https://github.com/ARM-software/kleidiai.git
+[submodule "pytorch_dtensor_test/third_party/flash-attention"]
+	path = pytorch_dtensor_test/third_party/flash-attention
+	url = https://github.com/Dao-AILab/flash-attention.git
+[submodule "pytorch_dtensor_test/third_party/aiter"]
+	path = pytorch_dtensor_test/third_party/aiter
+	url = https://github.com/ROCm/aiter.git
