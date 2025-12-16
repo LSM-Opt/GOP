@@ -123,7 +123,8 @@ class ColwiseParallel(ParallelStyle):
             dist_param = nn.Parameter(
                 distribute_tensor(
                     param, device_mesh, [Shard(0)], src_data_rank=self.src_data_rank
-                )
+                ),
+                requires_grad=False,
             )
             module.register_parameter(name, dist_param)
 
@@ -249,7 +250,8 @@ class RowwiseParallel(ParallelStyle):
                     device_mesh,
                     [Shard(1)],
                     src_data_rank=self.src_data_rank,
-                )
+                ),
+                requires_grad=False,
             ),
         )
         if getattr(module, "bias", None) is not None:
@@ -262,7 +264,8 @@ class RowwiseParallel(ParallelStyle):
                         device_mesh,
                         [Replicate()],
                         src_data_rank=self.src_data_rank,
-                    )
+                    ),
+                    requires_grad=False,
                 ),
             )
 
